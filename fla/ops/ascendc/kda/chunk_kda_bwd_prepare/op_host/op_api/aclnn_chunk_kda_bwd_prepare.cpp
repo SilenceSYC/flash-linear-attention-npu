@@ -3,6 +3,7 @@
 #include "op_common/log/log.h"
 #include "aclnn_chunk_kda_bwd_prepare.h"
 #include "chunk_kda_bwd_prepare.h"
+#include "../../../../common/host_utils/log.h"
 
 #include <cmath>
 #include <sstream>
@@ -44,6 +45,9 @@ aclnnStatus Missing(const char *name)
 aclnnStatus InvalidValue(const char *name, const std::string &actual, const std::string &expected)
 {
     OP_LOGE_FOR_INVALID_VALUE(OP_NAME, name, actual, expected);
+#else
+    OP_LOGE_LIBOPAPI_REPORT_VALUE_COMPAT(OP_NAME, name, actual, expected);
+#endif
     return ACLNN_ERR_PARAM_INVALID;
 }
 
@@ -61,6 +65,10 @@ aclnnStatus InvalidShape(const aclTensor *tensor, const char *name, const std::s
     const auto correct = expected.size() >= 2 && expected.front() == '[' && expected.back() == ']'
         ? expected.substr(1, expected.size() - 2) : expected;
     OP_LOGE_FOR_INVALID_SHAPE(OP_NAME, name, shape, correct);
+#else
+    // Older SDKs have no EZ0008 catalog entry. Keep details in their EZ0002 report.
+    OP_LOGE_LIBOPAPI_REPORT_VALUE_COMPAT(OP_NAME, name, actual, expected);
+#endif
     return ACLNN_ERR_PARAM_INVALID;
 }
 
@@ -71,6 +79,11 @@ aclnnStatus CheckTensor(const aclTensor *tensor, DataType dtype, const char *nam
         OP_LOGE_FOR_INVALID_DTYPE(OP_NAME, name,
             ge::TypeUtils::DataTypeToSerialString(tensor->GetDataType()),
             ge::TypeUtils::DataTypeToSerialString(dtype));
+#else
+        const auto actual = ge::TypeUtils::DataTypeToSerialString(tensor->GetDataType());
+        const auto expected = ge::TypeUtils::DataTypeToSerialString(dtype);
+        OP_LOGE_LIBOPAPI_REPORT_DTYPE_COMPAT(OP_NAME, name, actual, expected);
+#endif
         return ACLNN_ERR_PARAM_INVALID;
     }
     if (!IsContiguous(tensor)) return InvalidArgument(name, "must be contiguous");
@@ -207,6 +220,8 @@ extern "C" aclnnStatus aclnnChunkKdaBwdPrepareGetWorkspaceSize(
     const aclTensor *dAqkOut, const aclTensor *dvOut, const aclTensor *dqRawOut,
     uint64_t *workspaceSize, aclOpExecutor **executor)
 {
+    const char *inputLayout = layout;
+
     // DFX also checks these pointers, but its generic error omits the operator
     // and parameter names. Report them before entering the DFX helper.
     if (workspaceSize == nullptr) return Missing("workspaceSize");

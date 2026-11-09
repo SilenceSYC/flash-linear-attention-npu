@@ -14,6 +14,7 @@
 #include "opdev/op_dfx.h"
 #include "opdev/op_executor.h"
 #include "opdev/tensor_view_utils.h"
+#include "../../../../../common/host_utils/log.h"
 
 #if GDN_FINALIZE_ENABLE_ARCH22
 #include <cstring>
@@ -22,6 +23,8 @@
 #endif
 
 using namespace op;
+
+static constexpr const char *CHUNK_GATED_DELTA_RULE_BWD_FINALIZE_ENTITY = "aclnnChunkGatedDeltaRuleBwdFinalize";
 
 namespace {
 
@@ -62,14 +65,34 @@ aclnnStatus aclnnChunkGatedDeltaRuleBwdFinalizeGetWorkspaceSize(
                cuSeqlensOptional, chunkIndicesOptional),
         DFX_OUT(dqOut, dkOut, dvOut, dbetaOut, dgOut));
 
-    CHECK_COND(q != nullptr && k != nullptr && v != nullptr && vNew != nullptr &&
-                   dO != nullptr && du != nullptr && g != nullptr && beta != nullptr &&
-                   h != nullptr && dh != nullptr && a != nullptr,
-               ACLNN_ERR_PARAM_NULLPTR, "Required input must not be nullptr.");
-    CHECK_COND(dqOut != nullptr && dkOut != nullptr && dvOut != nullptr &&
-                   dbetaOut != nullptr && dgOut != nullptr &&
-                   workspaceSize != nullptr && executor != nullptr,
-               ACLNN_ERR_PARAM_NULLPTR, "Output, workspaceSize and executor must not be nullptr.");
+
+    const std::array<const char *, 11> required = {
+        "q", "k", "v", "vNew", "dO", "du", "g", "beta", "h", "dh", "a"};
+    const std::array<const aclTensor *, 11> requiredTensors = {
+        q, k, v, vNew, dO, du, g, beta, h, dh, a};
+    for (size_t idx = 0; idx < required.size(); ++idx) {
+        if (requiredTensors[idx] == nullptr) {
+            OP_LOGE_LIBOPAPI_REPORT_COMPAT(CHUNK_GATED_DELTA_RULE_BWD_FINALIZE_ENTITY, required[idx]);
+            return ACLNN_ERR_PARAM_NULLPTR;
+        }
+    }
+    const std::array<const char *, 5> gradNames = {"dqOut", "dkOut", "dvOut", "dbetaOut", "dgOut"};
+    const std::array<const aclTensor *, 5> gradTensors = {dqOut, dkOut, dvOut, dbetaOut, dgOut};
+    for (size_t idx = 0; idx < gradNames.size(); ++idx) {
+        if (gradTensors[idx] == nullptr) {
+            OP_LOGE_LIBOPAPI_REPORT_COMPAT(CHUNK_GATED_DELTA_RULE_BWD_FINALIZE_ENTITY, gradNames[idx]);
+            return ACLNN_ERR_PARAM_NULLPTR;
+        }
+    }
+    if (workspaceSize == nullptr) {
+        OP_LOGE_LIBOPAPI_REPORT_COMPAT(CHUNK_GATED_DELTA_RULE_BWD_FINALIZE_ENTITY, "workspaceSize");
+        return ACLNN_ERR_PARAM_NULLPTR;
+    }
+    if (executor == nullptr) {
+        OP_LOGE_LIBOPAPI_REPORT_COMPAT(CHUNK_GATED_DELTA_RULE_BWD_FINALIZE_ENTITY, "executor");
+
+        return ACLNN_ERR_PARAM_NULLPTR;
+    }
 #if GDN_FINALIZE_ENABLE_ARCH22
     // A2/A3 使用私有 Host 路径；A5 继续执行原有校验、连续化和 executor 流程。
     if (GetCurrentPlatformInfo().GetCurNpuArch() == NpuArch::DAV_2201) {
