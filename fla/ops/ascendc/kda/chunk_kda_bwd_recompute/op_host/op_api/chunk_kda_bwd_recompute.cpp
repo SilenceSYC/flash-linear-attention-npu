@@ -2,6 +2,7 @@
 #include "opdev/make_op_executor.h"
 #include "opdev/op_dfx.h"
 #include "opdev/op_log.h"
+#include "../../../../common/host_utils/log.h"
 
 using namespace op;
 
@@ -29,7 +30,15 @@ const std::array<const aclTensor *, 5> ChunkKdaBwdRecompute(
     const aclTensor *qgOut, const aclTensor *kgOut, const aclTensor *gkOut, aclOpExecutor *executor)
 {
     L0_DFX(ChunkKdaBwdRecompute, q, k, v, g, beta, a, aLogOptional, dtBiasOptional, cuSeqlensOptional,
-           chunkIndicesOptional, chunkSize, useGateInKernel, useExp2, lowerBound, wOut, uOut, qgOut, kgOut, gkOut);
+           chunkIndicesOptional, chunkSize, useGateInKernel, useExp2, lowerBound, inputLayout,
+           wOut, uOut, qgOut, kgOut, gkOut);
+    // Reserved attribute: tensors still use the existing rank-4 BNSD contract.
+    if (!inputLayout || (std::strcmp(inputLayout, "BNSD") != 0 &&
+                         std::strcmp(inputLayout, "NTD") != 0)) {
+        OP_LOGE_LIBOPAPI_REPORT_VALUE_COMPAT("ChunkKdaBwdRecompute", "inputLayout",
+                                            inputLayout == nullptr ? "null" : inputLayout, "BNSD or NTD");
+        return {nullptr, nullptr, nullptr, nullptr, nullptr};
+    }
 
     const aclTensor *actualCuSeqlens = nullptr;
     if (cuSeqlensOptional != nullptr) {

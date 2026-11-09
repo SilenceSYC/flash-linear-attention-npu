@@ -4,8 +4,138 @@
 #include <register/op_impl_registry.h>
 #include "platform/platform_ascendc.h"
 #include "chunk_kda_bwd_finalize_arch22.h"
+#include "op_common/log/log.h"
+#include "../../../../common/host_utils/log.h"
 
 namespace optiling {
+
+namespace {
+ge::graphStatus ValidateFinalize(
+    gert::TilingContext *context, const ChunkKdaBwdFinalizeTilingContext &ctx,
+    KDA::ChunkKdaBwdFinalizeTilingData &shape, bool arch22,
+    bool useBetaSigmoid, bool allowNegEigval, const char *outputLayout)
+{
+    if (allowNegEigval && !useBetaSigmoid) {
+        OP_LOGE_LIBOPAPI_REPORT_VALUE_COMPAT(ctx.nodeName, "allowNegEigval", "true",
+                                                   "requires useBetaSigmoidInKernel=true");
+        return ge::GRAPH_FAILED;
+    }
+    if (!arch22 && useBetaSigmoid) {
+        OP_LOGE_LIBOPAPI_REPORT_VALUE_COMPAT(ctx.nodeName, "useBetaSigmoid", "true",
+                                                   "reserved but not supported on A5");
+        return ge::GRAPH_FAILED;
+    }
+    auto fail = [&]() {
+        OP_LOGE(ctx.nodeName, "invalid finalize shape, dtype, layout or metadata");
+        return ge::GRAPH_FAILED;
+    };
+    const bool variable = shape.isVariable != 0;
+    const size_t rank = ctx.q->GetStorageShape().GetDimNum();
+    const size_t base = rank == 3 ? 0 : 1;
+    if (shape.NV > UINT32_MAX / (128 * sizeof(float)) ||
+        static_cast<uint64_t>(shape.B) > INT64_MAX / 128 / sizeof(float) /
+            static_cast<uint64_t>(shape.NV) / static_cast<uint64_t>(shape.T)) return fail();
+    const bool headMajor = std::strcmp(outputLayout, rank == 3 ? "NTD" : "BNSD") == 0;
+    const bool tokenMajor = std::strcmp(outputLayout, rank == 3 ? "TND" : "BSND") == 0;
+    if (!headMajor && !tokenMajor) return fail();
+    auto tokenShape = [&](const gert::StorageShape *storage, int64_t width, bool tm) {
+        if (!storage || storage->GetStorageShape().GetDimNum() != rank) return false;
+        const auto &s = storage->GetStorageShape();
+        return (base == 0 || s.GetDim(0) == shape.B) &&
+            s.GetDim(base) == (tm ? shape.T : shape.NV) &&
+            s.GetDim(base + 1) == (tm ? shape.NV : shape.T) && s.GetDim(base + 2) == width;
+    };
+    auto scalarShape = [&](const gert::StorageShape *storage, bool tm) {
+        if (!storage || storage->GetStorageShape().GetDimNum() != rank - 1) return false;
+        const auto &s = storage->GetStorageShape();
+        return (base == 0 || s.GetDim(0) == shape.B) && s.GetDim(base) == (tm ? shape.T : shape.NV) &&
+            s.GetDim(base + 1) == (tm ? shape.NV : shape.T);
+    };
+    if (!tokenShape(context->GetRequiredInputShape(INPUT_Q), 128, shape.qkTokenMajor) ||
+        !tokenShape(context->GetRequiredInputShape(INPUT_K), 128, shape.qkTokenMajor) ||
+        !tokenShape(context->GetRequiredInputShape(INPUT_V), 128, shape.vTokenMajor)) return fail();
+    for (size_t i : {INPUT_GK, INPUT_V_NEW, INPUT_DV_SCAN, INPUT_DQ_RAW}) {
+        if (!tokenShape(context->GetRequiredInputShape(i), 128, false)) return fail();
+    }
+    for (size_t i : {INPUT_AKK, INPUT_D_AQK}) {
+        if (!tokenShape(context->GetRequiredInputShape(i), 64, false)) return fail();
+    }
+    if (!scalarShape(ctx.beta, false) ||
+        (ctx.qRstd && (!scalarShape(ctx.qRstd, false) || !scalarShape(ctx.kRstd, false)))) return fail();
+    if (variable) {
+        const auto *cuTensor = context->GetOptionalInputTensor(INPUT_CU_SEQLENS);
+        const auto *indicesTensor = context->GetOptionalInputTensor(INPUT_CHUNK_INDICES);
+        if (!cuTensor || !indicesTensor ||
+            cuTensor->GetDataType() != ge::DT_INT64 || indicesTensor->GetDataType() != ge::DT_INT64) return fail();
+        const auto *cu = cuTensor->GetData<int64_t>();
+        const auto *indices = indicesTensor->GetData<int64_t>();
+        const int64_t sequences = shape.seqNum;
+        if (!cu || !indices || cu[0] != 0 || cu[sequences] != shape.T) return fail();
+        int64_t task = 0;
+        for (int64_t seq = 0; seq < sequences; ++seq) {
+            if (cu[seq] < 0 || cu[seq + 1] < cu[seq] || cu[seq + 1] > shape.T) return fail();
+            const int64_t count = (cu[seq + 1] - cu[seq] + 64 - 1) / 64;
+            for (int64_t chunk = 0; chunk < count; ++chunk, ++task) {
+                if (task >= shape.totalChunkNum || indices[2 * task] != seq || indices[2 * task + 1] != chunk) return fail();
+            }
+        }
+        if (task != shape.totalChunkNum) return fail();
+    }
+    for (size_t i : {INPUT_Q, INPUT_K, INPUT_V, INPUT_AKK, INPUT_V_NEW, INPUT_H, INPUT_DH, INPUT_DV_SCAN}) {
+        const auto *d = context->GetInputDesc(i);
+        if (!d || d->GetDataType() != ge::DT_BF16) return fail();
+    }
+    for (size_t i : {INPUT_GK, INPUT_D_AQK, INPUT_DQ_RAW, INPUT_Q_RSTD, INPUT_K_RSTD, INPUT_DT_BIAS}) {
+        const auto *d = context->GetOptionalInputDesc(i);
+        if (d && d->GetDataType() != ge::DT_FLOAT) return fail();
+    }
+    const auto betaType = context->GetInputDesc(INPUT_BETA)->GetDataType();
+    const auto logType = context->GetInputDesc(INPUT_A_LOG)->GetDataType();
+    if ((betaType != ge::DT_FLOAT && (useBetaSigmoid || betaType != ge::DT_BF16)) ||
+        logType != ge::DT_FLOAT) return fail();
+    if (ctx.useGateInKernel) {
+        for (size_t i : {INPUT_RAW_G}) {
+            const auto *d = context->GetOptionalInputDesc(i);
+            if (!d || (d->GetDataType() != ge::DT_FLOAT && d->GetDataType() != ge::DT_BF16)) return fail();
+        }
+        const auto *a = context->GetOptionalInputShape(INPUT_A_LOG);
+        const auto *bias = context->GetOptionalInputShape(INPUT_DT_BIAS);
+        if (!tokenShape(context->GetOptionalInputShape(INPUT_RAW_G), 128, shape.rawTokenMajor) ||
+            !a || a->GetStorageShape().GetShapeSize() != shape.NV ||
+            (!bias || bias->GetStorageShape().GetShapeSize() != shape.NV * 128)) return fail();
+    }
+    for (size_t i = 0; i < 3; ++i) {
+        if (!tokenShape(context->GetOutputShape(i), 128, tokenMajor)) return fail();
+    }
+    if (!scalarShape(context->GetOutputShape(3), shape.rawTokenMajor || tokenMajor) ||
+        !tokenShape(context->GetOutputShape(4), 128, shape.rawTokenMajor || tokenMajor)) return fail();
+    const auto qType = context->GetOutputDesc(0)->GetDataType();
+    if (qType != ge::DT_BF16 || context->GetOutputDesc(1)->GetDataType() != qType ||
+        context->GetOutputDesc(2)->GetDataType() != ge::DT_BF16) return fail();
+    const auto dbType = context->GetOutputDesc(3)->GetDataType();
+    // Only the A2/A3 total-interface model-layout path separates effective beta
+    // storage from original beta gradient dtype. Standalone Finalize is unchanged.
+    if (dbType != betaType &&
+        !(arch22 && shape.rawTokenMajor && useBetaSigmoid &&
+          betaType == ge::DT_FLOAT && dbType == ge::DT_BF16)) return fail();
+    if (context->GetOutputDesc(4)->GetDataType() != context->GetInputDesc(INPUT_RAW_G)->GetDataType() ||
+        context->GetOutputDesc(5)->GetDataType() != ge::DT_FLOAT ||
+        context->GetOutputDesc(6)->GetDataType() != ge::DT_FLOAT) return fail();
+    for (size_t i = 0; i < 2; ++i) {
+        const auto &input = context->GetRequiredInputShape(INPUT_A_LOG + i)->GetStorageShape();
+        const auto &output = context->GetOutputShape(5 + i)->GetStorageShape();
+        if (input.GetDimNum() != output.GetDimNum()) return fail();
+        for (size_t axis = 0; axis < input.GetDimNum(); ++axis) {
+            if (input.GetDim(axis) != output.GetDim(axis)) return fail();
+        }
+    }
+    shape.outputTokenMajor = tokenMajor;
+    shape.gateOutputTokenMajor = shape.rawTokenMajor || tokenMajor;
+    shape.betaMode = useBetaSigmoid ? (allowNegEigval ? 2 : 1) : 0;
+    return ge::GRAPH_SUCCESS;
+}
+} // namespace
+
 
 ge::graphStatus Tiling4ChunkKdaBwdFinalize(gert::TilingContext *context)
 {
@@ -27,8 +157,10 @@ ge::graphStatus Tiling4ChunkKdaBwdFinalize(gert::TilingContext *context)
     OP_CHECK_NULL_WITH_CONTEXT(context, useGate);
     OP_CHECK_NULL_WITH_CONTEXT(context, useExp2);
     OP_CHECK_NULL_WITH_CONTEXT(context, stateVFirst);
-    if (!std::isfinite(*scale) || !std::isfinite(*lowerBound)) {
-        OP_LOGE(context->GetNodeName(), "scale/lower_bound must be finite");
+    if (!std::isfinite(static_cast<float>(*scale)) || !std::isfinite(static_cast<float>(*lowerBound)) ||
+        *lowerBound < -5.0 || static_cast<float>(*lowerBound) >= 0.0f) {
+        OP_LOGE_LIBOPAPI_REPORT_VALUE_COMPAT(context->GetNodeName(), "scale/lowerBound",
+                                                   "non-finite or out of range", "finite, lowerBound in [-5, 0)");
         return ge::GRAPH_FAILED;
     }
     const auto platform = platform_ascendc::PlatformAscendC(context->GetPlatformInfo());

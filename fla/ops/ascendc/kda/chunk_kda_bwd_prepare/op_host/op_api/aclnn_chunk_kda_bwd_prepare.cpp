@@ -1,5 +1,6 @@
 #include "aclnn_chunk_kda_bwd_prepare.h"
 #include "chunk_kda_bwd_prepare.h"
+#include "../../../../common/host_utils/log.h"
 
 #include <cmath>
 
@@ -27,14 +28,68 @@ bool SameShape(const aclTensor *lhs, const aclTensor *rhs)
             return false;
         }
     }
-    return true;
+    text << ']';
+    return text.str();
+}
+
+aclnnStatus Missing(const char *name)
+{
+    // CANN 9.0.0's OP_LOGE_WITH_INVALID_INPUT references an undefined param_name.
+    // Use its structured reporter directly without redefining SDK macros.
+    OP_LOGE_WITHOUT_REPORT(OP_NAME, "OP[%s] get [%s] failed.", OP_NAME, name);
+    const std::vector<const char *> keys = {"op_name", "param_name"};
+    const std::vector<const char *> values = {OP_NAME, name};
+    REPORT_PREDEFINED_ERR_MSG("EZ0004", keys, values);
+    return ACLNN_ERR_PARAM_NULLPTR;
+}
+
+aclnnStatus InvalidValue(const char *name, const std::string &actual, const std::string &expected)
+{
+#ifdef OP_LOGE_FOR_INVALID_VALUE
+    OP_LOGE_FOR_INVALID_VALUE(OP_NAME, name, actual, expected);
+#else
+    OP_LOGE_LIBOPAPI_REPORT_VALUE_COMPAT(OP_NAME, name, actual, expected);
+#endif
+    return ACLNN_ERR_PARAM_INVALID;
+}
+
+aclnnStatus InvalidArgument(const char *name, const std::string &reason)
+{
+    return InvalidValue(name, "invalid", reason);
+}
+
+aclnnStatus InvalidShape(const aclTensor *tensor, const char *name, const std::string &expected)
+{
+    const auto actual = ShapeText(tensor->GetViewShape());
+#ifdef OP_LOGE_FOR_INVALID_SHAPE
+    // The predefined message supplies the enclosing brackets itself.
+    const auto shape = actual.substr(1, actual.size() - 2);
+    const auto correct = expected.size() >= 2 && expected.front() == '[' && expected.back() == ']'
+        ? expected.substr(1, expected.size() - 2) : expected;
+    OP_LOGE_FOR_INVALID_SHAPE(OP_NAME, name, shape, correct);
+#else
+    // Older SDKs have no EZ0008 catalog entry. Keep details in their EZ0002 report.
+    OP_LOGE_LIBOPAPI_REPORT_VALUE_COMPAT(OP_NAME, name, actual, expected);
+#endif
+    return ACLNN_ERR_PARAM_INVALID;
 }
 
 aclnnStatus CheckTensor(const aclTensor *tensor, DataType dtype, const char *name)
 {
-    CHECK_COND(tensor != nullptr, ACLNN_ERR_PARAM_NULLPTR, "%s must not be nullptr", name);
-    CHECK_COND(IsContiguous(tensor), ACLNN_ERR_PARAM_INVALID, "%s must be contiguous", name);
-    CHECK_COND(tensor->GetDataType() == dtype, ACLNN_ERR_PARAM_INVALID, "%s has invalid dtype", name);
+    if (tensor == nullptr) return Missing(name);
+    if (tensor->GetDataType() != dtype) {
+#ifdef OP_LOGE_FOR_INVALID_DTYPE
+        OP_LOGE_FOR_INVALID_DTYPE(OP_NAME, name,
+            ge::TypeUtils::DataTypeToSerialString(tensor->GetDataType()),
+            ge::TypeUtils::DataTypeToSerialString(dtype));
+#else
+        const auto actual = ge::TypeUtils::DataTypeToSerialString(tensor->GetDataType());
+        const auto expected = ge::TypeUtils::DataTypeToSerialString(dtype);
+        OP_LOGE_LIBOPAPI_REPORT_DTYPE_COMPAT(OP_NAME, name, actual, expected);
+#endif
+        return ACLNN_ERR_PARAM_INVALID;
+    }
+    if (!IsContiguous(tensor)) return InvalidArgument(name, "must be contiguous");
     return ACLNN_SUCCESS;
 }
 aclnnStatus ValidateMetadata(
@@ -144,6 +199,12 @@ extern "C" aclnnStatus aclnnChunkKdaBwdPrepareGetWorkspaceSize(
     const aclTensor *dAqkOut, const aclTensor *dvOut, const aclTensor *dqRawOut,
     uint64_t *workspaceSize, aclOpExecutor **executor)
 {
+    const char *inputLayout = layout;
+
+    // DFX also checks these pointers, but its generic error omits the operator
+    // and parameter names. Report them before entering the DFX helper.
+    if (workspaceSize == nullptr) return Missing("workspaceSize");
+    if (executor == nullptr) return Missing("executor");
     L2_DFX_PHASE_1(aclnnChunkKdaBwdPrepare,
                    DFX_IN(aqk, vNew, dO, h, cuSeqlensOptional, chunkIndicesOptional,
                           scale, chunkSize, stateVFirst),
