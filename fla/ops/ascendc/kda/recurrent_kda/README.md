@@ -3,8 +3,8 @@
 `RecurrentKda` 是 KDA 的 fused recurrent 前向算子。算子在一个 AICore kernel 内完成 recurrent state decay、delta 更新和输出计算；`raw gate -> log gate` 和 `beta sigmoid` 可以在 kernel 内完成，不依赖 `KdaGateCumsum` 或 GDN recurrent 的接口。
 
 完整接口和调用示例见 [API 文档](docs/api.md)，实现方案见 [设计文档](docs/design.md)，非连续 state
-的 stride 约束与数据流见 [专项设计](docs/non_contiguous_state_design.md)，非连续 Q/K/V 的支持边界、
-回退策略与实测结果见 [QKV 专项设计](docs/non_contiguous_qkv_design.md)。Shape 符号统一引用
+的 stride 约束与数据流见 [专项设计](docs/design.md)，非连续 Q/K/V 的支持边界、
+回退策略与实测结果见 [QKV 专项设计](docs/design.md)。Shape 符号统一引用
 [KDA 模型符号表](../README.md#model-shape-symbols)。
 
 ## Python 接口

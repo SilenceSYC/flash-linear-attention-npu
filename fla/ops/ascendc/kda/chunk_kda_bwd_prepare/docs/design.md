@@ -46,7 +46,7 @@ packed 空序列及同核多任务做回归。原有路径性能、设备精度�
 
 实现采用 arch22 的 A2/A3 GM 中转路径。
 接口由 [api.md](api.md) 固定；验收用例及结果记录在
-[ATK README](../../../../../../tests/atk/chunk_kda_bwd_prepare_a3/README.md)。
+[ATK README](../../../../../../tests/atk/chunk_kda_bwd_prepare/README.md)。
 
 Stage 0 顺序计算 A、Q、D；A 通过每个 AIC 的四条 FP32 workspace record 交给两个 AIV，
 Q/D 直接写公开输出。Stage 1 负责三角掩码、scale 和尾列清零。每份 L0C 只有一次 Fixpipe。

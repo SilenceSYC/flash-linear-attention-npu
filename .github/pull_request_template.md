@@ -23,7 +23,7 @@
 > - NPU CI 会执行 `ci/example_st_cases.json` 中启用的 Example/ST 用例；当前 `case1_current_default` 保持原始 shape。新增 GVA、`Vdim=256` 等场景时，请在用例文件中显式填写 `B`、`T`、`chunk_size`、`query_head`、`value_head`、`Kdim`、`Vdim` 等 shape 字段，以及 `gate_source`、`gate_function`、`initial_state`、`output_final_state`、`qk_l2norm` 等行为字段。
 > - Example ST 必须使用与平台匹配的已验证 PyTorch/`torch_npu` 组合；A2 与 A5 不得混用 wheel、Python ABI 或 CANN 镜像，也不要拉取 `op-plugin` 重新编译。
 > - 修改算子 `def`、`aclnn` 接口入参类型，或修改 `torch` 接口入参类型等导致不满足 ABI 一致性的改动，必须由 `weinachuan` 在当前 head commit 上检视通过；ABI 敏感路径已由 CODEOWNERS 指向 `weinachuan`。
-> - NPU CI 部署与排障教程见 [`docs/Fla-npu仓CI部署教程.md`](docs/Fla-npu仓CI部署教程.md)。
+> - NPU CI 部署与排障教程见 [`docs/Fla-npu仓CI部署教程.md`](../docs/Fla-npu仓CI部署教程.md)。
 
 ## 关联 Issue / 背景
 
